@@ -5,12 +5,18 @@ on:
     - cron: "*/30 * * * *"
   workflow_dispatch:
 
+# 允许 Actions 把 index.html 推回仓库（否则 git push 会 403）
+permissions:
+  contents: write
+
 jobs:
   fetch-and-generate:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
+        with:
+          persist-credentials: true
 
       - name: 设置 Python
         uses: actions/setup-python@v5
@@ -29,5 +35,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
-          git diff --quiet && git diff --staged --quiet || (git commit -m "自动更新报告" && git push)
+          git add index.html
+          git diff --quiet && git diff --staged --quiet || git commit -m "自动更新报告"
+          git push
