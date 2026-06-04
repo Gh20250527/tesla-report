@@ -24,7 +24,7 @@ jobs:
         env:
           TESLA_USERNAME: ${{ secrets.TESLA_USERNAME }}
           TESLA_PASSWORD: ${{ secrets.TESLA_PASSWORD }}
-        run: python generate_report.py
+        run: python .github/workflows/generate_report.py
 
       - name: 提交网页到本仓库
         run: |
