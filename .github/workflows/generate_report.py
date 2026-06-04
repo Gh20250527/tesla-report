@@ -5,8 +5,9 @@ from datetime import datetime
 import pytz
 import requests
 
-# ---------- 中国区 Tesla API ----------
-BASE_URL = "https://owner-api.vn.cloud.tesla.cn"
+# 中国区：车辆列表等已迁移到 Fleet API；部分接口仍可用 Owner API
+OWNER_API = "https://owner-api.vn.cloud.tesla.cn"
+FLEET_API = "https://fleet-api.prd.cn.vn.cloud.tesla.cn"
 AUTH_URL = "https://auth.tesla.cn/oauth2/v3/token"
 CLIENT_ID = "ownerapi"
 
@@ -15,12 +16,15 @@ if not REFRESH_TOKEN:
     print(
         "错误: 未设置环境变量 TESLA_REFRESH_TOKEN。\n"
         "请在 GitHub 仓库 Settings → Secrets and variables → Actions 中\n"
-        "新建 Secret，名称必须为 TESLA_REFRESH_TOKEN（与 workflow 里 env 一致）。"
+        "新建 Secret，名称必须为 TESLA_REFRESH_TOKEN。"
     )
     raise SystemExit(1)
 
 
-# ---------- 1. 使用 refresh_token 获取 access_token ----------
+def auth_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
 def get_token():
     payload = {
         "grant_type": "refresh_token",
@@ -44,58 +48,115 @@ def get_token():
     return data["access_token"]
 
 
-# ---------- 2. 获取车辆列表 ----------
-def get_vehicles(token):
-    headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"{BASE_URL}/api/1/vehicles", headers=headers, timeout=30)
-    if r.status_code != 200:
-        print(f"获取车辆列表失败: {r.text}")
-        return []
-    return r.json()["response"]
+def _parse_products(data: dict) -> list[dict]:
+    """从 /products 中筛出车辆（含 vin）。"""
+    items = data.get("response") or []
+    vehicles = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("vin"):
+            vehicles.append(
+                {
+                    "id": item.get("id") or item.get("id_s"),
+                    "id_s": item.get("id_s"),
+                    "vin": item.get("vin"),
+                    "display_name": item.get("display_name", "Tesla"),
+                    "vehicle_id": item.get("vehicle_id"),
+                    "state": item.get("state"),
+                    "_api": "owner",
+                }
+            )
+    return vehicles
 
 
-# ---------- 3. 获取车辆数据（唤醒并等待） ----------
-def get_vehicle_data(token, vehicle_id):
-    headers = {"Authorization": f"Bearer {token}"}
-    r = requests.post(
-        f"{BASE_URL}/api/1/vehicles/{vehicle_id}/wake_up",
+def get_vehicles(token: str) -> list[dict]:
+    headers = auth_headers(token)
+
+    # 1) Fleet API（官方推荐）
+    r = requests.get(f"{FLEET_API}/api/1/vehicles", headers=headers, timeout=30)
+    if r.status_code == 200:
+        vehicles = r.json().get("response") or []
+        for v in vehicles:
+            v["_api"] = "fleet"
+        if vehicles:
+            print(f"通过 Fleet API 获取到 {len(vehicles)} 辆车")
+            return vehicles
+    print(f"Fleet API /vehicles: {r.status_code} {r.text[:300]}")
+
+    # 2) Owner API /products（社区常用替代 /vehicles）
+    r = requests.get(
+        f"{OWNER_API}/api/1/products",
         headers=headers,
+        params={"orders": "true"},
         timeout=30,
     )
-    if r.status_code != 200:
-        print(f"唤醒请求: {r.status_code} {r.text}")
+    if r.status_code == 200:
+        vehicles = _parse_products(r.json())
+        if vehicles:
+            print(f"通过 Owner API /products 获取到 {len(vehicles)} 辆车")
+            return vehicles
+    print(f"Owner API /products: {r.status_code} {r.text[:300]}")
 
-    for _ in range(20):
-        r = requests.get(
-            f"{BASE_URL}/api/1/vehicles/{vehicle_id}",
-            headers=headers,
-            timeout=30,
-        )
-        state = r.json()["response"]["state"]
-        if state == "online":
-            break
-        time.sleep(2)
-    else:
-        print("车辆未在线")
-        return None
-
-    r = requests.get(
-        f"{BASE_URL}/api/1/vehicles/{vehicle_id}/vehicle_data",
-        headers=headers,
-        timeout=60,
-    )
-    if r.status_code != 200:
-        print(f"获取车辆数据失败: {r.text}")
-        return None
-    return r.json()["response"]
-
-
-# ---------- 4. 获取最近行程（占位，需长期采样后自行实现） ----------
-def get_recent_trips(token, vehicle_id):
     return []
 
 
-# ---------- 5. 生成简单报告网页 ----------
+def get_vehicle_data(token: str, vehicle: dict):
+    headers = auth_headers(token)
+    vin = vehicle.get("vin")
+    vid = vehicle.get("id") or vehicle.get("id_s")
+    use_fleet = vehicle.get("_api") == "fleet" and vin
+
+    bases = []
+    if use_fleet:
+        bases.append(("fleet", FLEET_API, vin))
+    if vid:
+        bases.append(("owner", OWNER_API, str(vid)))
+    if vin and not use_fleet:
+        bases.append(("fleet", FLEET_API, vin))
+
+    for api_name, base, resource_id in bases:
+        print(f"尝试 {api_name} API 获取车辆数据 (id/vin={resource_id})…")
+        requests.post(
+            f"{base}/api/1/vehicles/{resource_id}/wake_up",
+            headers=headers,
+            timeout=30,
+        )
+
+        for _ in range(20):
+            r = requests.get(
+                f"{base}/api/1/vehicles/{resource_id}",
+                headers=headers,
+                timeout=30,
+            )
+            if r.status_code != 200:
+                print(f"  状态查询失败: {r.status_code} {r.text[:200]}")
+                break
+            state = r.json().get("response", {}).get("state")
+            print(f"  车辆状态: {state}")
+            if state == "online":
+                break
+            time.sleep(2)
+        else:
+            print("  车辆长时间未在线，仍尝试拉取 vehicle_data…")
+
+        r = requests.get(
+            f"{base}/api/1/vehicles/{resource_id}/vehicle_data",
+            headers=headers,
+            timeout=90,
+        )
+        if r.status_code == 200:
+            print(f"  已从 {api_name} API 获取 vehicle_data")
+            return r.json().get("response")
+        print(f"  vehicle_data 失败: {r.status_code} {r.text[:300]}")
+
+    return None
+
+
+def get_recent_trips(token, vehicle):
+    return []
+
+
 def generate_html(vehicle_data, trips, charge_data):
     vehicle_state = vehicle_data.get("vehicle_state", {})
     charge_state = vehicle_data.get("charge_state", {})
@@ -140,7 +201,6 @@ h2 {{margin: 0 0 10px 0; color: #333;}}
         f.write(html)
 
 
-# ---------- 主流程 ----------
 if __name__ == "__main__":
     token = get_token()
     if not token:
@@ -148,17 +208,23 @@ if __name__ == "__main__":
 
     vehicles = get_vehicles(token)
     if not vehicles:
-        print("没有车辆")
+        print("没有车辆。若持续失败，可能需使用 Fleet API 专用 token（developer.tesla.cn 注册应用）。")
         exit(1)
 
     vehicle = vehicles[0]
-    vehicle_id = vehicle["id"]
-    print(f"车辆 VIN: {vehicle['vin']}, ID: {vehicle_id}")
+    print(
+        f"车辆: {vehicle.get('display_name')}, "
+        f"VIN: {vehicle.get('vin')}, ID: {vehicle.get('id')}"
+    )
 
-    data = get_vehicle_data(token, vehicle_id)
+    data = get_vehicle_data(token, vehicle)
     if not data:
-        exit(1)
+        with open("index.html", "w", encoding="utf-8") as f:
+            f.write(
+                "<h1>已连接 API，但本次未能获取车辆详细数据（车辆可能休眠或需 Fleet API 权限）</h1>"
+            )
+        print("已生成占位 index.html")
+        exit(0)
 
-    trips = get_recent_trips(token, vehicle_id)
-    generate_html(data, trips, data.get("charge_state", {}))
+    generate_html(data, [], data.get("charge_state", {}))
     print("报告已生成: index.html")
