@@ -10,7 +10,14 @@ BASE_URL = "https://owner-api.vn.cloud.tesla.cn"
 AUTH_URL = "https://auth.tesla.cn/oauth2/v3/token"
 CLIENT_ID = "ownerapi"
 
-REFRESH_TOKEN = os.environ["TESLA_REFRESH_TOKEN"]
+REFRESH_TOKEN = os.environ.get("TESLA_REFRESH_TOKEN", "").strip()
+if not REFRESH_TOKEN:
+    print(
+        "错误: 未设置环境变量 TESLA_REFRESH_TOKEN。\n"
+        "请在 GitHub 仓库 Settings → Secrets and variables → Actions 中\n"
+        "新建 Secret，名称必须为 TESLA_REFRESH_TOKEN（与 workflow 里 env 一致）。"
+    )
+    raise SystemExit(1)
 
 
 # ---------- 1. 使用 refresh_token 获取 access_token ----------
@@ -30,7 +37,6 @@ def get_token():
         print(f"认证失败: {r.text}")
         return None
     data = r.json()
-    # 特斯拉可能轮换 refresh_token；若返回新的，建议更新 GitHub Secret
     new_refresh = data.get("refresh_token")
     if new_refresh and new_refresh != REFRESH_TOKEN:
         print("提示: 收到新的 refresh_token，请更新 GitHub Secret TESLA_REFRESH_TOKEN")
