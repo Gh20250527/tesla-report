@@ -1,9 +1,9 @@
 name: 获取特斯拉数据并生成报告
+
 on:
   schedule:
-    # 每30分钟运行一次，你可以修改
-    - cron: '*/30 * * * *'
-  workflow_dispatch:  # 允许手动触发
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 jobs:
   fetch-and-generate:
@@ -15,15 +15,14 @@ jobs:
       - name: 设置 Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: 安装依赖
         run: pip install requests pytz
 
       - name: 抓取特斯拉数据并生成网页
         env:
-          TESLA_USERNAME: ${{ secrets.TESLA_USERNAME }}
-          TESLA_PASSWORD: ${{ secrets.TESLA_PASSWORD }}
+          TESLA_REFRESH_TOKEN: ${{ secrets.TESLA_REFRESH_TOKEN }}
         run: python .github/workflows/generate_report.py
 
       - name: 提交网页到本仓库
