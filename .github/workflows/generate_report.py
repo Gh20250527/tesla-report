@@ -1,52 +1,70 @@
-import requests, json, os, base64, hashlib, secrets, time
-from datetime import datetime, timedelta
-import pytz
+import os
+import time
+from datetime import datetime
 
-# ---------- 使用中国区 Tesla API ----------
+import pytz
+import requests
+
+# ---------- 中国区 Tesla API ----------
 BASE_URL = "https://owner-api.vn.cloud.tesla.cn"
 AUTH_URL = "https://auth.tesla.cn/oauth2/v3/token"
-CLIENT_ID = "ownerapi"   # 特斯拉中国官方 client_id，无需修改
-REDIRECT_URI = "https://auth.tesla.cn/void/callback"
+CLIENT_ID = "ownerapi"
 
-USERNAME = os.environ["TESLA_USERNAME"]
-PASSWORD = os.environ["TESLA_PASSWORD"]
+REFRESH_TOKEN = os.environ["TESLA_REFRESH_TOKEN"]
 
-# ---------- 1. 获取 Access Token ----------
+
+# ---------- 1. 使用 refresh_token 获取 access_token ----------
 def get_token():
-    # 中国区使用密码直接换取 token（非标准流程但社区常用，安全可靠）
     payload = {
-        "grant_type": "password",
+        "grant_type": "refresh_token",
         "client_id": CLIENT_ID,
-        "email": USERNAME,
-        "password": PASSWORD,
+        "refresh_token": REFRESH_TOKEN,
     }
-    headers = {"Content-Type": "application/json"}
-    r = requests.post(AUTH_URL, json=payload, headers=headers)
+    r = requests.post(
+        AUTH_URL,
+        data=payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=30,
+    )
     if r.status_code != 200:
         print(f"认证失败: {r.text}")
         return None
-    return r.json()["access_token"]
+    data = r.json()
+    # 特斯拉可能轮换 refresh_token；若返回新的，建议更新 GitHub Secret
+    new_refresh = data.get("refresh_token")
+    if new_refresh and new_refresh != REFRESH_TOKEN:
+        print("提示: 收到新的 refresh_token，请更新 GitHub Secret TESLA_REFRESH_TOKEN")
+    print("成功获取 access_token")
+    return data["access_token"]
+
 
 # ---------- 2. 获取车辆列表 ----------
 def get_vehicles(token):
     headers = {"Authorization": f"Bearer {token}"}
-    r = requests.get(f"{BASE_URL}/api/1/vehicles", headers=headers)
+    r = requests.get(f"{BASE_URL}/api/1/vehicles", headers=headers, timeout=30)
     if r.status_code != 200:
         print(f"获取车辆列表失败: {r.text}")
         return []
     return r.json()["response"]
 
+
 # ---------- 3. 获取车辆数据（唤醒并等待） ----------
 def get_vehicle_data(token, vehicle_id):
     headers = {"Authorization": f"Bearer {token}"}
-    # 唤醒车辆
-    r = requests.post(f"{BASE_URL}/api/1/vehicles/{vehicle_id}/wake_up", headers=headers)
+    r = requests.post(
+        f"{BASE_URL}/api/1/vehicles/{vehicle_id}/wake_up",
+        headers=headers,
+        timeout=30,
+    )
     if r.status_code != 200:
-        print(f"唤醒失败: {r.text}")
-        return None
-    # 等待在线（最多40秒）
+        print(f"唤醒请求: {r.status_code} {r.text}")
+
     for _ in range(20):
-        r = requests.get(f"{BASE_URL}/api/1/vehicles/{vehicle_id}", headers=headers)
+        r = requests.get(
+            f"{BASE_URL}/api/1/vehicles/{vehicle_id}",
+            headers=headers,
+            timeout=30,
+        )
         state = r.json()["response"]["state"]
         if state == "online":
             break
@@ -54,28 +72,27 @@ def get_vehicle_data(token, vehicle_id):
     else:
         print("车辆未在线")
         return None
-    # 获取完整数据
-    r = requests.get(f"{BASE_URL}/api/1/vehicles/{vehicle_id}/vehicle_data", headers=headers)
+
+    r = requests.get(
+        f"{BASE_URL}/api/1/vehicles/{vehicle_id}/vehicle_data",
+        headers=headers,
+        timeout=60,
+    )
     if r.status_code != 200:
         print(f"获取车辆数据失败: {r.text}")
         return None
     return r.json()["response"]
 
-# ---------- 4. 获取最近行程 ----------
+
+# ---------- 4. 获取最近行程（占位，需长期采样后自行实现） ----------
 def get_recent_trips(token, vehicle_id):
-    headers = {"Authorization": f"Bearer {token}"}
-    # 特斯拉中国没有直接 "trips" 接口，我们用 stream 数据或自己推算，但为了极简，这里用 "trip" 接口（可能不存在）。
-    # 实际上中国区车辆数据中有 "drive_state" 和 "charge_state"，我们直接提取行程部分。
-    # 这里提供一个模拟行程列表，实际你可以根据 drive_state 记录历史，我们仅展示当前车辆状态。
-    # 真正的行程记录需要你长期运行并保存，这个脚本首次运行只能显示当前信息。
     return []
+
 
 # ---------- 5. 生成简单报告网页 ----------
 def generate_html(vehicle_data, trips, charge_data):
     vehicle_state = vehicle_data.get("vehicle_state", {})
-    drive_state = vehicle_data.get("drive_state", {})
     charge_state = vehicle_data.get("charge_state", {})
-    climate_state = vehicle_data.get("climate_state", {})
 
     odometer = vehicle_state.get("odometer", 0)
     battery = charge_state.get("battery_level", 0)
@@ -92,8 +109,6 @@ body {{font-family: -apple-system, sans-serif; margin: 20px; background: #f5f5f5
 .card {{background: white; border-radius: 15px; padding: 20px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.1);}}
 h2 {{margin: 0 0 10px 0; color: #333;}}
 .value {{font-size: 24px; font-weight: bold; color: #e74c3c;}}
-table {{width: 100%; border-collapse: collapse;}}
-th, td {{padding: 8px; text-align: left; border-bottom: 1px solid #ddd;}}
 </style>
 </head>
 <body>
@@ -109,8 +124,8 @@ th, td {{padding: 8px; text-align: left; border-bottom: 1px solid #ddd;}}
 <p>已充电量: {charge_state.get('charge_energy_added', 0):.2f} kWh</p>
 </div>
 <div class="card">
-<h2>📊 行程记录（功能持续完善中）</h2>
-<p>此版本首次运行，暂未积累历史行程。后续每30分钟自动更新，即可显示完整行程和充电统计。</p>
+<h2>📊 行程记录</h2>
+<p>需长期定时采样后积累历史行程，当前为单次快照。</p>
 </div>
 <p style="text-align:center; color:#888; font-size:12px;">自动生成于 {datetime.now(pytz.timezone('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')}</p>
 </body>
@@ -118,16 +133,18 @@ th, td {{padding: 8px; text-align: left; border-bottom: 1px solid #ddd;}}
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
 
+
 # ---------- 主流程 ----------
 if __name__ == "__main__":
     token = get_token()
     if not token:
         exit(1)
+
     vehicles = get_vehicles(token)
     if not vehicles:
         print("没有车辆")
         exit(1)
-    # 默认使用第一辆车
+
     vehicle = vehicles[0]
     vehicle_id = vehicle["id"]
     print(f"车辆 VIN: {vehicle['vin']}, ID: {vehicle_id}")
@@ -136,7 +153,6 @@ if __name__ == "__main__":
     if not data:
         exit(1)
 
-    # 暂不抓取完整历史行程（需长期运行）
-    trips = []
+    trips = get_recent_trips(token, vehicle_id)
     generate_html(data, trips, data.get("charge_state", {}))
     print("报告已生成: index.html")
